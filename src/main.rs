@@ -1,8 +1,9 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
 use std::f32::consts::PI;
-use std::thread;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::io;
 
 /// A dual-head overlapping time-domain pitch shifter (avoids clicking artifacts).
 struct PitchShifter {
@@ -95,6 +96,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Pitch factor: 0.75 = deeper voice, 1.25 = higher voice
     let mut shifter = PitchShifter::new(sample_rate, 0.75);
+    
+    // Shared atomic flag for toggling the effect
+    let is_clean = Arc::new(AtomicBool::new(false));
+    let is_clean_clone = Arc::clone(&is_clean);
 
     let err_fn = |err| eprintln!("Audio stream error: {}", err);
 
@@ -117,13 +122,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_stream = output_device.build_output_stream(
         &out_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            // Check the current toggle state (Relaxed is fast enough for audio threads)
+            let bypass = is_clean_clone.load(Ordering::Relaxed);
+            
             for frame in data.chunks_mut(out_channels) {
                 let processed = if let Ok(in_sample) = consumer.pop() {
-                    shifter.process(in_sample)
+                    let shifted_sample = shifter.process(in_sample);
+                    if bypass {
+                        in_sample // Output clean audio
+                    } else {
+                        shifted_sample // Output pitch-shifted audio
+                    }
                 } else {
                     0.0
                 };
-                // Write the pitch-shifted mono sample across all output channels
+                
+                // Write the mono sample across all output channels
                 for sample in frame.iter_mut() {
                     *sample = processed;
                 }
@@ -136,10 +150,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     input_stream.play()?;
     output_stream.play()?;
 
-    println!("Voice Changer is running! Open qpwgraph to route the ALSA/PipeWire nodes.");
+    println!("=========================================");
+    println!("Voice Changer is running! (Open qpwgraph to route nodes)");
+    println!("Press [ENTER] to toggle between CLEAN and DEEP voice.");
     println!("Press Ctrl+C to stop.");
+    println!("=========================================");
+    println!("Current mode: DEEP");
 
+    // Replaces the infinite sleep loop with a terminal input reader
+    let mut input = String::new();
     loop {
-        thread::sleep(Duration::from_secs(1));
+        input.clear();
+        io::stdin().read_line(&mut input)?; // Blocks until Enter is pressed
+        
+        // Toggle the atomic flag
+        let current_state = is_clean.load(Ordering::SeqCst);
+        let new_state = !current_state;
+        is_clean.store(new_state, Ordering::SeqCst);
+        
+        if new_state {
+            println!("Current mode: CLEAN (Bypassed)");
+        } else {
+            println!("Current mode: DEEP (Shifted)");
+        }
     }
 }
