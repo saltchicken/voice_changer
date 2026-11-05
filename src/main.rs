@@ -10,7 +10,49 @@ const WINDOW_DURATION_SEC: f32 = 0.040; // 40ms window for vocal grain overlap
 const DEFAULT_PITCH_FACTOR: f32 = 0.75; // 0.75 = deeper, 1.25 = higher
 const BUFFER_DURATION_SEC: u32 = 2;     // Ring buffer size in seconds
 const OUTPUT_GAIN: f32 = 2.5;           // Volume multiplier
+const GATE_THRESHOLD: f32 = 0.025;      // Volume required to open mic (adjust between 0.005 and 0.05)
+const GATE_ATTACK_MS: f32 = 5.0;        // How fast the mic opens (ms)
+const GATE_RELEASE_MS: f32 = 150.0;     // How long the mic stays open after you stop speaking (ms)
 // -------------------------------
+
+/// A standard Noise Gate to eliminate background noise when not speaking.
+struct NoiseGate {
+    threshold: f32,
+    envelope: f32,
+    gain: f32,
+    attack_coef: f32,
+    release_coef: f32,
+}
+
+impl NoiseGate {
+    fn new(sample_rate: u32, threshold: f32, attack_ms: f32, release_ms: f32) -> Self {
+        Self {
+            threshold,
+            envelope: 0.0,
+            gain: 0.0,
+            // Calculate standard DSP smoothing coefficients based on sample rate
+            attack_coef: (-1.0 / ((attack_ms / 1000.0) * sample_rate as f32)).exp(),
+            release_coef: (-1.0 / ((release_ms / 1000.0) * sample_rate as f32)).exp(),
+        }
+    }
+
+    fn process(&mut self, input: f32) -> f32 {
+        let abs_in = input.abs();
+        
+        // Track the volume envelope of the incoming audio
+        let env_coef = if abs_in > self.envelope { self.attack_coef } else { self.release_coef };
+        self.envelope = env_coef * self.envelope + (1.0 - env_coef) * abs_in;
+
+        // Target gain is 1.0 (open) if we are above threshold, or 0.0 (muted) if below
+        let target_gain = if self.envelope > self.threshold { 1.0 } else { 0.0 };
+        
+        // Smoothly transition the actual volume so the gate doesn't cause clicking artifacts
+        let gain_coef = if target_gain > self.gain { self.attack_coef } else { self.release_coef };
+        self.gain = gain_coef * self.gain + (1.0 - gain_coef) * target_gain;
+
+        input * self.gain
+    }
+}
 
 /// A dual-head overlapping time-domain pitch shifter (avoids clicking artifacts).
 struct PitchShifter {
@@ -125,7 +167,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Ring buffer for mono samples using the constant
     let (mut producer, mut consumer) = RingBuffer::<f32>::new((sample_rate * BUFFER_DURATION_SEC) as usize);
 
-    // Instantiate both effects
+    // Instantiate all effects
+    let mut gate = NoiseGate::new(sample_rate, GATE_THRESHOLD, GATE_ATTACK_MS, GATE_RELEASE_MS);
     let mut shifter = PitchShifter::new(sample_rate, DEFAULT_PITCH_FACTOR);
     let mut robot = RobotVoice::new(sample_rate, 50.0); // 50 Hz carrier frequency
     
@@ -160,15 +203,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for frame in data.chunks_mut(out_channels) {
                 let processed = if let Ok(in_sample) = consumer.pop() {
                     
-                    // Always process time-based effects to keep their buffers updated
-                    let shifted_sample = shifter.process(in_sample);
-                    let robot_sample = robot.process(in_sample);
+                    // 1. Gate the raw audio first to strip background noise
+                    let gated_sample = gate.process(in_sample);
+                    
+                    // 2. Process the gated sample through the time-based effects
+                    let shifted_sample = shifter.process(gated_sample);
+                    let robot_sample = robot.process(gated_sample);
 
-                    // Route the audio based on the active mode
+                    // 3. Route the audio based on the active mode
                     match mode {
                         1 => shifted_sample,
                         2 => robot_sample,
-                        _ => in_sample, // Mode 0 (or fallback) is clean audio
+                        _ => gated_sample, // Clean audio is now gated too!
                     }
                 } else {
                     0.0
