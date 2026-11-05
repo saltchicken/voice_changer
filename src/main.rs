@@ -1,9 +1,16 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
 use std::f32::consts::PI;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// --- CONFIGURATION CONSTANTS ---
+const WINDOW_DURATION_SEC: f32 = 0.040; // 40ms window for vocal grain overlap
+const DEFAULT_PITCH_FACTOR: f32 = 0.75; // 0.75 = deeper, 1.25 = higher
+const BUFFER_DURATION_SEC: u32 = 2; // Ring buffer size in seconds
+const OUTPUT_GAIN: f32 = 2.5; // Volume multiplier
+// -------------------------------
 
 /// A dual-head overlapping time-domain pitch shifter (avoids clicking artifacts).
 struct PitchShifter {
@@ -15,8 +22,7 @@ struct PitchShifter {
 
 impl PitchShifter {
     fn new(sample_rate: u32, pitch_factor: f32) -> Self {
-        // ~40ms window size for smooth vocal grain overlapping
-        let window_size = ((sample_rate as f32) * 0.040) as usize;
+        let window_size = ((sample_rate as f32) * WINDOW_DURATION_SEC) as usize;
         let phase_inc = (1.0 - pitch_factor) / (window_size as f32);
 
         Self {
@@ -91,12 +97,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_config: cpal::StreamConfig = output_device.default_output_config()?.into();
     let out_channels = out_config.channels as usize;
 
-    // 2-second ring buffer for mono samples
-    let (mut producer, mut consumer) = RingBuffer::<f32>::new((sample_rate * 2) as usize);
+    // Ring buffer for mono samples using the constant
+    let (mut producer, mut consumer) =
+        RingBuffer::<f32>::new((sample_rate * BUFFER_DURATION_SEC) as usize);
 
-    // Pitch factor: 0.75 = deeper voice, 1.25 = higher voice
-    let mut shifter = PitchShifter::new(sample_rate, 0.75);
-    
+    // Pitch shifter using the constant
+    let mut shifter = PitchShifter::new(sample_rate, DEFAULT_PITCH_FACTOR);
+
     // Shared atomic flag for toggling the effect
     let is_clean = Arc::new(AtomicBool::new(false));
     let is_clean_clone = Arc::clone(&is_clean);
@@ -122,11 +129,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_stream = output_device.build_output_stream(
         &out_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            // Check the current toggle state (Relaxed is fast enough for audio threads)
             let bypass = is_clean_clone.load(Ordering::Relaxed);
-            
-            // ADD THIS: Volume multiplier (2.0 = 200% volume, adjust as needed)
-            let gain_multiplier = 2.5; 
-            
+
             for frame in data.chunks_mut(out_channels) {
                 let processed = if let Ok(in_sample) = consumer.pop() {
                     let shifted_sample = shifter.process(in_sample);
@@ -138,10 +143,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     0.0
                 };
-                
+
                 // Apply gain and hard-limit to prevent digital clipping
-                let final_sample = (processed * gain_multiplier).clamp(-1.0, 1.0);
-                
+                let final_sample = (processed * OUTPUT_GAIN).clamp(-1.0, 1.0);
+
                 // Write the amplified sample across all output channels
                 for sample in frame.iter_mut() {
                     *sample = final_sample;
@@ -167,12 +172,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         input.clear();
         io::stdin().read_line(&mut input)?; // Blocks until Enter is pressed
-        
+
         // Toggle the atomic flag
         let current_state = is_clean.load(Ordering::SeqCst);
         let new_state = !current_state;
         is_clean.store(new_state, Ordering::SeqCst);
-        
+
         if new_state {
             println!("Current mode: CLEAN (Bypassed)");
         } else {
