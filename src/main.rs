@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use config::*;
-use dynamics::NoiseGate;
+use dynamics::{NoiseGate, Compressor};
 use effects::{PitchShifter, RobotVoice};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,6 +40,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut gate = NoiseGate::new(sample_rate, GATE_THRESHOLD, GATE_ATTACK_MS, GATE_RELEASE_MS);
     let mut shifter = PitchShifter::new(sample_rate, DEFAULT_PITCH_FACTOR, WINDOW_DURATION_SEC);
     let mut robot = RobotVoice::new(sample_rate, 50.0); // 50 Hz carrier frequency
+    
+    // Threshold -3dB, 4:1 Ratio, 2ms attack (fast), 100ms release
+    let mut compressor = Compressor::new(sample_rate, -3.0, 4.0, 2.0, 100.0);
     
     // Shared atomic state: 0 = Clean, 1 = Deep, 2 = Robot
     let active_mode = Arc::new(AtomicUsize::new(1));
@@ -89,10 +92,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     0.0
                 };
                 
-                // Apply gain and hard-limit to prevent digital clipping
-                let final_sample = (processed * OUTPUT_GAIN).clamp(-1.0, 1.0);
+                // 4. Apply gain and compression
+                let amplified = processed * OUTPUT_GAIN;
+                let compressed = compressor.process(amplified);
                 
-                // Write the amplified sample across all output channels
+                // Hard-limit to prevent float overflow
+                let final_sample = compressed.clamp(-1.0, 1.0);
+                
+                // Write the final sample across all output channels
                 for sample in frame.iter_mut() {
                     *sample = final_sample;
                 }

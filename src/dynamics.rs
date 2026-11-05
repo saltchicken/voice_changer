@@ -36,3 +36,45 @@ impl NoiseGate {
         input * self.gain
     }
 }
+
+/// A standard DSP Compressor to prevent clipping and smooth out dynamics.
+pub struct Compressor {
+    threshold_db: f32,
+    ratio: f32,
+    attack_coef: f32,
+    release_coef: f32,
+    envelope: f32,
+}
+
+impl Compressor {
+    pub fn new(sample_rate: u32, threshold_db: f32, ratio: f32, attack_ms: f32, release_ms: f32) -> Self {
+        Self {
+            threshold_db,
+            ratio,
+            attack_coef: (-1.0 / ((attack_ms / 1000.0) * sample_rate as f32)).exp(),
+            release_coef: (-1.0 / ((release_ms / 1000.0) * sample_rate as f32)).exp(),
+            envelope: -120.0, // Start silence at -120dB
+        }
+    }
+
+    pub fn process(&mut self, input: f32) -> f32 {
+        let abs_in = input.abs();
+        
+        // Convert to decibels (prevent log10(0) panic)
+        let in_db = if abs_in > 1e-6 { 20.0 * abs_in.log10() } else { -120.0 };
+
+        // Smooth the envelope detector
+        let coef = if in_db > self.envelope { self.attack_coef } else { self.release_coef };
+        self.envelope = coef * self.envelope + (1.0 - coef) * in_db;
+
+        // Calculate Gain Reduction
+        let mut gain_db = 0.0;
+        if self.envelope > self.threshold_db {
+            gain_db = (self.threshold_db - self.envelope) * (1.0 - 1.0 / self.ratio);
+        }
+
+        // Apply gain reduction back in the linear domain
+        let gain_linear = 10.0_f32.powf(gain_db / 20.0);
+        input * gain_linear
+    }
+}

@@ -21,17 +21,35 @@ impl PitchShifter {
         }
     }
 
-    fn read_interpolated(&self, delay: f32) -> f32 {
+    fn read_hermite(&self, delay: f32) -> f32 {
         let len = self.buffer.len() as f32;
         let mut read_pos = (self.write_idx as f32) - delay;
+        
+        // Handle buffer wrap-around
         while read_pos < 0.0 {
             read_pos += len;
         }
-        let r0 = (read_pos as usize) % self.buffer.len();
-        let r1 = (r0 + 1) % self.buffer.len();
+
+        // Get the 4 surrounding sample indices for the cubic curve
+        let r1 = (read_pos as usize) % self.buffer.len();
+        let r0 = if r1 == 0 { self.buffer.len() - 1 } else { r1 - 1 };
+        let r2 = (r1 + 1) % self.buffer.len();
+        let r3 = (r2 + 1) % self.buffer.len();
+
         let frac = read_pos.fract();
 
-        self.buffer[r0] * (1.0 - frac) + self.buffer[r1] * frac
+        let y0 = self.buffer[r0];
+        let y1 = self.buffer[r1];
+        let y2 = self.buffer[r2];
+        let y3 = self.buffer[r3];
+
+        // 4-point, 3rd-order Hermite polynomial calculation
+        let c0 = y1;
+        let c1 = 0.5 * (y2 - y0);
+        let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+        let c3 = 1.5 * (y1 - y2) + 0.5 * (y3 - y0);
+
+        c0 + frac * (c1 + frac * (c2 + frac * c3))
     }
 
     pub fn process(&mut self, input: f32) -> f32 {
@@ -57,7 +75,7 @@ impl PitchShifter {
         let gain1 = 0.5 * (1.0 - (2.0 * PI * p1).cos());
         let gain2 = 0.5 * (1.0 - (2.0 * PI * p2).cos());
 
-        let out = self.read_interpolated(delay1) * gain1 + self.read_interpolated(delay2) * gain2;
+        let out = self.read_hermite(delay1) * gain1 + self.read_hermite(delay2) * gain2;
 
         self.write_idx = (self.write_idx + 1) % self.buffer.len();
         out
