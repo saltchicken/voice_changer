@@ -2,14 +2,14 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
 use std::f32::consts::PI;
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 // --- CONFIGURATION CONSTANTS ---
 const WINDOW_DURATION_SEC: f32 = 0.040; // 40ms window for vocal grain overlap
 const DEFAULT_PITCH_FACTOR: f32 = 0.75; // 0.75 = deeper, 1.25 = higher
-const BUFFER_DURATION_SEC: u32 = 2; // Ring buffer size in seconds
-const OUTPUT_GAIN: f32 = 2.5; // Volume multiplier
+const BUFFER_DURATION_SEC: u32 = 2;     // Ring buffer size in seconds
+const OUTPUT_GAIN: f32 = 2.5;           // Volume multiplier
 // -------------------------------
 
 /// A dual-head overlapping time-domain pitch shifter (avoids clicking artifacts).
@@ -76,6 +76,31 @@ impl PitchShifter {
     }
 }
 
+/// A simple ring modulation effect for a robotic "Dalek" voice.
+struct RobotVoice {
+    phasor: f32,
+    phase_inc: f32,
+}
+
+impl RobotVoice {
+    fn new(sample_rate: u32, frequency: f32) -> Self {
+        Self {
+            phasor: 0.0,
+            phase_inc: frequency / sample_rate as f32,
+        }
+    }
+
+    fn process(&mut self, input: f32) -> f32 {
+        self.phasor += self.phase_inc;
+        if self.phasor >= 1.0 {
+            self.phasor -= 1.0;
+        }
+        // Multiply input by a sine wave to create a robotic ring modulation
+        let carrier = (self.phasor * 2.0 * PI).sin();
+        input * carrier
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = cpal::default_host();
 
@@ -98,15 +123,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_channels = out_config.channels as usize;
 
     // Ring buffer for mono samples using the constant
-    let (mut producer, mut consumer) =
-        RingBuffer::<f32>::new((sample_rate * BUFFER_DURATION_SEC) as usize);
+    let (mut producer, mut consumer) = RingBuffer::<f32>::new((sample_rate * BUFFER_DURATION_SEC) as usize);
 
-    // Pitch shifter using the constant
+    // Instantiate both effects
     let mut shifter = PitchShifter::new(sample_rate, DEFAULT_PITCH_FACTOR);
-
-    // Shared atomic flag for toggling the effect
-    let is_clean = Arc::new(AtomicBool::new(false));
-    let is_clean_clone = Arc::clone(&is_clean);
+    let mut robot = RobotVoice::new(sample_rate, 50.0); // 50 Hz carrier frequency
+    
+    // Shared atomic state: 0 = Clean, 1 = Deep, 2 = Robot
+    let active_mode = Arc::new(AtomicUsize::new(1));
+    let active_mode_clone = Arc::clone(&active_mode);
 
     let err_fn = |err| eprintln!("Audio stream error: {}", err);
 
@@ -129,24 +154,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_stream = output_device.build_output_stream(
         &out_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            // Check the current toggle state (Relaxed is fast enough for audio threads)
-            let bypass = is_clean_clone.load(Ordering::Relaxed);
-
+            // Read the current mode as an integer
+            let mode = active_mode_clone.load(Ordering::Relaxed);
+            
             for frame in data.chunks_mut(out_channels) {
                 let processed = if let Ok(in_sample) = consumer.pop() {
+                    
+                    // Always process time-based effects to keep their buffers updated
                     let shifted_sample = shifter.process(in_sample);
-                    if bypass {
-                        in_sample // Output clean audio
-                    } else {
-                        shifted_sample // Output pitch-shifted audio
+                    let robot_sample = robot.process(in_sample);
+
+                    // Route the audio based on the active mode
+                    match mode {
+                        1 => shifted_sample,
+                        2 => robot_sample,
+                        _ => in_sample, // Mode 0 (or fallback) is clean audio
                     }
                 } else {
                     0.0
                 };
-
+                
                 // Apply gain and hard-limit to prevent digital clipping
                 let final_sample = (processed * OUTPUT_GAIN).clamp(-1.0, 1.0);
-
+                
                 // Write the amplified sample across all output channels
                 for sample in frame.iter_mut() {
                     *sample = final_sample;
@@ -162,26 +192,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=========================================");
     println!("Voice Changer is running! (Open qpwgraph to route nodes)");
-    println!("Press [ENTER] to toggle between CLEAN and DEEP voice.");
+    println!("Press [ENTER] to cycle through effects.");
     println!("Press Ctrl+C to stop.");
     println!("=========================================");
-    println!("Current mode: DEEP");
+    
+    let mode_names = ["CLEAN", "DEEP VOICE", "ROBOT VOICE"];
+    let mut current_mode_index = 1; // Start on DEEP VOICE to match the atomic initial state
+    println!("Current mode: {}", mode_names[current_mode_index]);
 
-    // Replaces the infinite sleep loop with a terminal input reader
+    // Terminal loop for cycling effects
     let mut input = String::new();
     loop {
         input.clear();
         io::stdin().read_line(&mut input)?; // Blocks until Enter is pressed
-
-        // Toggle the atomic flag
-        let current_state = is_clean.load(Ordering::SeqCst);
-        let new_state = !current_state;
-        is_clean.store(new_state, Ordering::SeqCst);
-
-        if new_state {
-            println!("Current mode: CLEAN (Bypassed)");
-        } else {
-            println!("Current mode: DEEP (Shifted)");
-        }
+        
+        // Cycle to the next mode and wrap around back to 0
+        current_mode_index = (current_mode_index + 1) % mode_names.len();
+        active_mode.store(current_mode_index, Ordering::SeqCst);
+        
+        println!("Current mode: {}", mode_names[current_mode_index]);
     }
 }
