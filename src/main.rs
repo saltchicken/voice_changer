@@ -1,4 +1,5 @@
 mod config;
+mod dynamics;
 mod effects;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -8,7 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use config::*;
-use effects::{NoiseGate, PitchShifter, RobotVoice};
+use dynamics::NoiseGate;
+use effects::{PitchShifter, RobotVoice};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = cpal::default_host();
@@ -34,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Ring buffer for mono samples using the constant
     let (mut producer, mut consumer) = RingBuffer::<f32>::new((sample_rate * BUFFER_DURATION_SEC) as usize);
 
-    // Instantiate all effects
+    // Instantiate all processors
     let mut gate = NoiseGate::new(sample_rate, GATE_THRESHOLD, GATE_ATTACK_MS, GATE_RELEASE_MS);
     let mut shifter = PitchShifter::new(sample_rate, DEFAULT_PITCH_FACTOR, WINDOW_DURATION_SEC);
     let mut robot = RobotVoice::new(sample_rate, 50.0); // 50 Hz carrier frequency
@@ -73,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 1. Gate the raw audio first to strip background noise
                     let gated_sample = gate.process(in_sample);
                     
-                    // 2. Process the gated sample through the time-based effects
+                    // 2. Process the gated sample through the creative time-based effects
                     let shifted_sample = shifter.process(gated_sample);
                     let robot_sample = robot.process(gated_sample);
 
