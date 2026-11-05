@@ -1,147 +1,14 @@
+mod config;
+mod effects;
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
-use std::f32::consts::PI;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-// --- CONFIGURATION CONSTANTS ---
-const WINDOW_DURATION_SEC: f32 = 0.040; // 40ms window for vocal grain overlap
-const DEFAULT_PITCH_FACTOR: f32 = 0.75; // 0.75 = deeper, 1.25 = higher
-const BUFFER_DURATION_SEC: u32 = 2;     // Ring buffer size in seconds
-const OUTPUT_GAIN: f32 = 2.5;           // Volume multiplier
-const GATE_THRESHOLD: f32 = 0.025;      // Volume required to open mic (adjust between 0.005 and 0.05)
-const GATE_ATTACK_MS: f32 = 5.0;        // How fast the mic opens (ms)
-const GATE_RELEASE_MS: f32 = 150.0;     // How long the mic stays open after you stop speaking (ms)
-// -------------------------------
-
-/// A standard Noise Gate to eliminate background noise when not speaking.
-struct NoiseGate {
-    threshold: f32,
-    envelope: f32,
-    gain: f32,
-    attack_coef: f32,
-    release_coef: f32,
-}
-
-impl NoiseGate {
-    fn new(sample_rate: u32, threshold: f32, attack_ms: f32, release_ms: f32) -> Self {
-        Self {
-            threshold,
-            envelope: 0.0,
-            gain: 0.0,
-            // Calculate standard DSP smoothing coefficients based on sample rate
-            attack_coef: (-1.0 / ((attack_ms / 1000.0) * sample_rate as f32)).exp(),
-            release_coef: (-1.0 / ((release_ms / 1000.0) * sample_rate as f32)).exp(),
-        }
-    }
-
-    fn process(&mut self, input: f32) -> f32 {
-        let abs_in = input.abs();
-        
-        // Track the volume envelope of the incoming audio
-        let env_coef = if abs_in > self.envelope { self.attack_coef } else { self.release_coef };
-        self.envelope = env_coef * self.envelope + (1.0 - env_coef) * abs_in;
-
-        // Target gain is 1.0 (open) if we are above threshold, or 0.0 (muted) if below
-        let target_gain = if self.envelope > self.threshold { 1.0 } else { 0.0 };
-        
-        // Smoothly transition the actual volume so the gate doesn't cause clicking artifacts
-        let gain_coef = if target_gain > self.gain { self.attack_coef } else { self.release_coef };
-        self.gain = gain_coef * self.gain + (1.0 - gain_coef) * target_gain;
-
-        input * self.gain
-    }
-}
-
-/// A dual-head overlapping time-domain pitch shifter (avoids clicking artifacts).
-struct PitchShifter {
-    buffer: Vec<f32>,
-    write_idx: usize,
-    phasor: f32,
-    phase_inc: f32,
-}
-
-impl PitchShifter {
-    fn new(sample_rate: u32, pitch_factor: f32) -> Self {
-        let window_size = ((sample_rate as f32) * WINDOW_DURATION_SEC) as usize;
-        let phase_inc = (1.0 - pitch_factor) / (window_size as f32);
-
-        Self {
-            buffer: vec![0.0; window_size],
-            write_idx: 0,
-            phasor: 0.0,
-            phase_inc,
-        }
-    }
-
-    fn read_interpolated(&self, delay: f32) -> f32 {
-        let len = self.buffer.len() as f32;
-        let mut read_pos = (self.write_idx as f32) - delay;
-        while read_pos < 0.0 {
-            read_pos += len;
-        }
-        let r0 = (read_pos as usize) % self.buffer.len();
-        let r1 = (r0 + 1) % self.buffer.len();
-        let frac = read_pos.fract();
-
-        self.buffer[r0] * (1.0 - frac) + self.buffer[r1] * frac
-    }
-
-    fn process(&mut self, input: f32) -> f32 {
-        self.buffer[self.write_idx] = input;
-        let len = self.buffer.len() as f32;
-
-        // Update phasor [0.0, 1.0)
-        self.phasor += self.phase_inc;
-        if self.phasor >= 1.0 {
-            self.phasor -= 1.0;
-        } else if self.phasor < 0.0 {
-            self.phasor += 1.0;
-        }
-
-        // Two read heads 180 degrees (0.5 phase) apart
-        let p1 = self.phasor;
-        let p2 = (self.phasor + 0.5).fract();
-
-        let delay1 = p1 * len;
-        let delay2 = p2 * len;
-
-        // Hann window crossfade gains so head jumps are silent
-        let gain1 = 0.5 * (1.0 - (2.0 * PI * p1).cos());
-        let gain2 = 0.5 * (1.0 - (2.0 * PI * p2).cos());
-
-        let out = self.read_interpolated(delay1) * gain1 + self.read_interpolated(delay2) * gain2;
-
-        self.write_idx = (self.write_idx + 1) % self.buffer.len();
-        out
-    }
-}
-
-/// A simple ring modulation effect for a robotic "Dalek" voice.
-struct RobotVoice {
-    phasor: f32,
-    phase_inc: f32,
-}
-
-impl RobotVoice {
-    fn new(sample_rate: u32, frequency: f32) -> Self {
-        Self {
-            phasor: 0.0,
-            phase_inc: frequency / sample_rate as f32,
-        }
-    }
-
-    fn process(&mut self, input: f32) -> f32 {
-        self.phasor += self.phase_inc;
-        if self.phasor >= 1.0 {
-            self.phasor -= 1.0;
-        }
-        // Multiply input by a sine wave to create a robotic ring modulation
-        let carrier = (self.phasor * 2.0 * PI).sin();
-        input * carrier
-    }
-}
+use config::*;
+use effects::{NoiseGate, PitchShifter, RobotVoice};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = cpal::default_host();
@@ -169,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Instantiate all effects
     let mut gate = NoiseGate::new(sample_rate, GATE_THRESHOLD, GATE_ATTACK_MS, GATE_RELEASE_MS);
-    let mut shifter = PitchShifter::new(sample_rate, DEFAULT_PITCH_FACTOR);
+    let mut shifter = PitchShifter::new(sample_rate, DEFAULT_PITCH_FACTOR, WINDOW_DURATION_SEC);
     let mut robot = RobotVoice::new(sample_rate, 50.0); // 50 Hz carrier frequency
     
     // Shared atomic state: 0 = Clean, 1 = Deep, 2 = Robot
