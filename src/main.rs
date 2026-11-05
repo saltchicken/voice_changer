@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use config::*;
 use dynamics::{NoiseGate, Compressor};
-use effects::{PitchShifter, RobotVoice};
+use effects::PitchShifter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = cpal::default_host();
@@ -39,12 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Instantiate all processors
     let mut gate = NoiseGate::new(sample_rate, GATE_THRESHOLD, GATE_ATTACK_MS, GATE_RELEASE_MS);
     let mut shifter = PitchShifter::new(sample_rate, DEFAULT_PITCH_FACTOR, WINDOW_DURATION_SEC);
-    let mut robot = RobotVoice::new(sample_rate, 50.0); // 50 Hz carrier frequency
     
     // Threshold -3dB, 4:1 Ratio, 2ms attack (fast), 100ms release
     let mut compressor = Compressor::new(sample_rate, -3.0, 4.0, 2.0, 100.0);
     
-    // Shared atomic state: 0 = Clean, 1 = Deep, 2 = Robot
+    // Shared atomic state: 0 = Clean, 1 = Deep
     let active_mode = Arc::new(AtomicUsize::new(1));
     let active_mode_clone = Arc::clone(&active_mode);
 
@@ -80,12 +79,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     
                     // 2. Process the gated sample through the creative time-based effects
                     let shifted_sample = shifter.process(gated_sample);
-                    let robot_sample = robot.process(gated_sample);
 
                     // 3. Route the audio based on the active mode
                     match mode {
                         1 => shifted_sample,
-                        2 => robot_sample,
                         _ => gated_sample, // Clean audio is now gated too!
                     }
                 } else {
@@ -114,11 +111,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=========================================");
     println!("Voice Changer is running! (Open qpwgraph to route nodes)");
-    println!("Press [ENTER] to cycle through effects.");
+    println!("Press [ENTER] to toggle effect.");
     println!("Press Ctrl+C to stop.");
     println!("=========================================");
     
-    let mode_names = ["CLEAN", "DEEP VOICE", "ROBOT VOICE"];
+    let mode_names = ["CLEAN", "DEEP VOICE"];
     let mut current_mode_index = 1; // Start on DEEP VOICE to match the atomic initial state
     println!("Current mode: {}", mode_names[current_mode_index]);
 

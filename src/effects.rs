@@ -81,28 +81,3 @@ impl PitchShifter {
         out
     }
 }
-
-/// A simple ring modulation effect for a robotic "Dalek" voice.
-pub struct RobotVoice {
-    phasor: f32,
-    phase_inc: f32,
-}
-
-impl RobotVoice {
-    pub fn new(sample_rate: u32, frequency: f32) -> Self {
-        Self {
-            phasor: 0.0,
-            phase_inc: frequency / sample_rate as f32,
-        }
-    }
-
-    pub fn process(&mut self, input: f32) -> f32 {
-        self.phasor += self.phase_inc;
-        if self.phasor >= 1.0 {
-            self.phasor -= 1.0;
-        }
-        // Multiply input by a sine wave to create a robotic ring modulation
-        let carrier = (self.phasor * 2.0 * PI).sin();
-        input * carrier
-    }
-}
