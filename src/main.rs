@@ -122,8 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_stream = output_device.build_output_stream(
         &out_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            // Check the current toggle state (Relaxed is fast enough for audio threads)
             let bypass = is_clean_clone.load(Ordering::Relaxed);
+            
+            // ADD THIS: Volume multiplier (2.0 = 200% volume, adjust as needed)
+            let gain_multiplier = 2.5; 
             
             for frame in data.chunks_mut(out_channels) {
                 let processed = if let Ok(in_sample) = consumer.pop() {
@@ -137,9 +139,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     0.0
                 };
                 
-                // Write the mono sample across all output channels
+                // Apply gain and hard-limit to prevent digital clipping
+                let final_sample = (processed * gain_multiplier).clamp(-1.0, 1.0);
+                
+                // Write the amplified sample across all output channels
                 for sample in frame.iter_mut() {
-                    *sample = processed;
+                    *sample = final_sample;
                 }
             }
         },
