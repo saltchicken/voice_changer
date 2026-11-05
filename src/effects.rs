@@ -6,19 +6,26 @@ pub struct PitchShifter {
     write_idx: usize,
     phasor: f32,
     phase_inc: f32,
+    window_size: f32, // Added to allow recalculating phase_inc dynamically
 }
 
 impl PitchShifter {
     pub fn new(sample_rate: u32, pitch_factor: f32, window_duration_sec: f32) -> Self {
-        let window_size = ((sample_rate as f32) * window_duration_sec) as usize;
-        let phase_inc = (1.0 - pitch_factor) / (window_size as f32);
+        let window_size = (sample_rate as f32) * window_duration_sec;
+        let phase_inc = (1.0 - pitch_factor) / window_size;
 
         Self {
-            buffer: vec![0.0; window_size],
+            buffer: vec![0.0; window_size as usize],
             write_idx: 0,
             phasor: 0.0,
             phase_inc,
+            window_size,
         }
+    }
+
+    /// Update the pitch shift multiplier dynamically
+    pub fn set_pitch_factor(&mut self, pitch_factor: f32) {
+        self.phase_inc = (1.0 - pitch_factor) / self.window_size;
     }
 
     fn read_hermite(&self, delay: f32) -> f32 {
